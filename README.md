@@ -1,25 +1,36 @@
 # RemoteLED
 
-Control a physical LED over Bluetooth Low Energy using a Raspberry Pi and an Android app. The Pi displays a QR code on a kiosk page; scanning it deep‑links the Android app, which connects to the Pi's BLE peripheral and toggles a GPIO pin using a short per‑session key.
+QR-to-device payment activation system. A customer scans a QR code shown on a Raspberry Pi kiosk, picks a service (laundry, vending, air compressor, …), pays (Stripe or mock), and the Pi activates a GPIO relay/LED for the authorized duration. The backend signs each authorization with ECDSA (secp256k1); the Android app relays it to the Pi over Bluetooth Low Energy.
 
-The project includes everything needed to provision a Raspberry Pi (web kiosk, BLE peripheral in Node or Python, systemd services) and the Android client app (QR scanner + BLE GATT client).
+The repo contains five parts:
+- **backend/** — Python FastAPI API (port 9999): devices, services, orders, payments, ECDSA authorizations, telemetry, admin.
+- **frontend/admin-react/** — React 18 + TypeScript + Vite admin console (served at `/admin/`, dev port 5173).
+- **database/** — PostgreSQL schema, seed data, migrations.
+- **pi/** — Raspberry Pi BLE peripheral (Python) + web/React kiosk.
+- **android/** — Kotlin Android app (QR scanner + BLE GATT client).
+
+At the BLE layer the demo still works standalone: the Pi displays a deep link as a QR, the phone scans it, connects to the Pi's BLE peripheral, and toggles a GPIO with a short per-session key.
 
 > Important: Android emulators do not support real Bluetooth LE. Use a physical Android device for end‑to‑end testing.
 
 ## Overview
 - Architecture: Pi runs a BLE peripheral and displays a deep link QR code on a local web page. Android scans the QR or opens the deep link directly, connects via BLE, and writes commands to toggle a GPIO.
 - Deep link format: `remoteled://connect/<MAC>/<svc16>/<char16>/<bleKey>`.
-- BLE stacks on Pi: Node.js or Python (only one active at a time; systemd services are mutually exclusive).
+- BLE stack on Pi: **Python** (`pi/python/code.py`). A Node.js variant is referenced by some scripts/docs, but `pi/node/main.js` is not present in this repo, so only the Python implementation is functional.
 
 ## Repository Layout
+- `backend/`: FastAPI API server (`app/main.py`), PostgreSQL, Stripe, ECDSA
+- `frontend/admin-react/`: React + TypeScript + Vite admin console
+- `database/`: PostgreSQL `schema.sql`, `seed.sql`, migrations
 - `pi/`: Raspberry Pi provisioning and runtime
-  - `install.sh`: One‑shot provisioning of Node/Python deps, nginx, kiosk, and services
-  - `kiosk.sh`: Launches Chromium in kiosk mode to `http://localhost`
-  - `node/`: Node BLE peripheral (`main.js`), service unit and starter script
-  - `python/`: Python BLE peripheral (`code.py`), service unit and starter script
+  - `install.sh`: One‑shot provisioning of Python deps, nginx, kiosk, and the Python systemd service. Note: it copies a `kiosk.sh` from the `pi/` dir that is **not checked into this repo** — supply one (Chromium kiosk launcher pointing at `http://localhost`) before running the installer on a Pi.
+  - `python/`: Python BLE peripheral (`code.py`), `led_service.py`, `remoteled-python.service`, starter scripts
+  - `node/`: Node BLE starter (`start.sh`) that execs `node main.js` — `main.js` is **not present**, so this path is non-functional as shipped
   - `web/`: Static kiosk (`index.html`) that renders the QR code
+  - `kiosk/`: Alternative React (Create React App) kiosk
 - `android/RemoteLedBLE/`: Android app (deep link + BLE GATT + QR scanner)
-- `docs/`: Architecture notes and planning
+- `tests/`: Shell-script integration tests
+- `docs/`: Architecture notes (`ARCHITECTURE.md`, `SYSTEM.md`)
 
 ## Python Dependency Management
 
@@ -34,7 +45,7 @@ The Pi-specific dependencies (RPi.GPIO, bluezero, dbus-python) are only installe
 ## Requirements
 - Raspberry Pi with Bluetooth (tested on Raspberry Pi OS Bookworm, Wayfire/LXDE)
 - Internet on first setup (to install packages)
-- Android device (current app sets `minSdk=34`, i.e., Android 14+)
+- Android device (current app sets `minSdk=26`, i.e., Android 8.0+)
 
 ## End‑to‑End Quick Start
 
@@ -46,21 +57,15 @@ The Pi-specific dependencies (RPi.GPIO, bluezero, dbus-python) are only installe
    ```
 
    What the installer does:
-   - Installs Node 18, Python BLE dependencies, and nginx
-   - Copies code to `/usr/local/remoteled/`
-   - Sets up the kiosk to show `http://localhost` in Chromium on boot
-   - Creates two services (mutually exclusive): `remoteled-node.service` and `remoteled-python.service`
+   - Installs Python BLE dependencies and nginx
+   - Copies `pi/python/` and `splash.png` to `/usr/local/remoteled/`
+   - Sets up the kiosk to show `http://localhost` in Chromium on boot (via a `kiosk.sh` you must provide, see Repository Layout)
+   - Installs and enables the `remoteled-python.service` systemd unit
 
-2. Choose ONE BLE implementation and enable it (Python recommended):
+2. Enable the Python BLE service (uses GPIO BCM 17):
 
    ```bash
-   # Python implementation (uses GPIO BCM 17)
-   sudo systemctl disable --now remoteled-node.service 2>/dev/null || true
    sudo systemctl enable --now remoteled-python.service
-
-   # or Node implementation (adjust GPIO pin in code if needed)
-   # sudo systemctl disable --now remoteled-python.service
-   # sudo systemctl enable --now remoteled-node.service
    ```
 
 3. Ensure web server is running:
@@ -80,10 +85,7 @@ The Pi-specific dependencies (RPi.GPIO, bluezero, dbus-python) are only installe
 5. View logs for the BLE service until you see a deep link being generated:
 
    ```bash
-   # For Python
    journalctl -u remoteled-python.service -f
-   # For Node
-   # journalctl -u remoteled-node.service -f
    ```
 
    You should see a line like:
@@ -92,10 +94,10 @@ The Pi-specific dependencies (RPi.GPIO, bluezero, dbus-python) are only installe
    Generated Deep Link: remoteled://connect/AA:BB:CC:DD:EE:FF/abcd/ef01/1234
    ```
 
-Hardware note: The LED should be connected to ground and GPIO BCM 17 (Python) or the pin configured in `pi/node/main.js` (Node). Add a series resistor.
+Hardware note: The LED/relay should be connected to ground and GPIO BCM 17 (Python). Add a series resistor for a bare LED.
 
 ### B. Android app setup
-1. Use a physical device (Android 14+ given current config). Connect via USB with USB debugging enabled.
+1. Use a physical device (Android 8.0+ / `minSdk=26`). Connect via USB with USB debugging enabled.
 2. Open `android/RemoteLedBLE` in Android Studio.
 3. Select your phone in the device dropdown and click Run. Grant Camera, Location, and Bluetooth permissions.
 4. The app launches the QR scanner. Scan the kiosk QR.
@@ -106,7 +108,7 @@ Deep link alternative (without scanning):
 adb shell am start -a android.intent.action.VIEW -d "remoteled://connect/AA:BB:CC:DD:EE:FF/abcd/ef01/1234"
 ```
 
-If your phone runs an older Android version, lower `minSdk` in `android/RemoteLedBLE/app/build.gradle.kts` and rebuild.
+The app targets `minSdk=26` (Android 8.0+). If your phone is older, lower `minSdk` in `android/RemoteLedBLE/app/build.gradle.kts` and rebuild.
 
 ## Quick Start (Raspberry Pi)
 1) Prepare the Pi
@@ -117,26 +119,22 @@ If your phone runs an older Android version, lower `minSdk` in `android/RemoteLe
 - Copy this repo (or just the `pi/` folder) onto the Pi.
 - Execute: `bash pi/install.sh`
 - What it does:
-  - Installs Node 18, Python BLE deps, and nginx
+  - Installs Python BLE deps and nginx
   - Copies code to `/usr/local/remoteled/`
   - Sets Chromium to autostart a kiosk at `http://localhost` and displays QR
-  - Installs `remoteled-node.service` and `remoteled-python.service` (conflicting so only one runs)
+  - Installs and enables `remoteled-python.service`
 
 3) Reboot and verify
 - After reboot, the kiosk should show “Scan QR” with a code.
-- Check services: `sudo systemctl status remoteled-node` or `sudo systemctl status remoteled-python`
-- Tail logs: `sudo journalctl -u remoteled-node -f` (or `remoteled-python`)
-
-4) Switch BLE implementation (optional)
-- Prefer Node: `sudo systemctl enable --now remoteled-node && sudo systemctl disable --now remoteled-python`
-- Prefer Python: `sudo systemctl enable --now remoteled-python && sudo systemctl disable --now remoteled-node`
+- Check service: `sudo systemctl status remoteled-python`
+- Tail logs: `sudo journalctl -u remoteled-python -f`
 
 ### Rapid Pi + Backend test loop
 For the exact workflow documented in `~/Downloads/pi_ble_qr_setup.txt`, use the following checklist whenever you need to validate the entire BLE/QR flow quickly:
 
 1. **Start the backend on your Mac**
-   - From the repo root: `cd backend && uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 9999`
-   - Keep it running and confirm `http://192.168.1.158:9999/health` responds.
+   - From the repo root: `cd backend && uv run --no-project uvicorn app.main:app --reload --host 0.0.0.0 --port 9999`
+   - Keep it running and confirm `http://<MAC_LAN_IP>:9999/health` responds (the IPs below are examples — use your own, e.g. `ipconfig getifaddr en0`).
 
 2. **Launch the Pi BLE peripheral**
    - On the Pi: `cd ~/Documents/remoteled/pi/python && ./start.sh`
@@ -144,15 +142,15 @@ For the exact workflow documented in `~/Downloads/pi_ble_qr_setup.txt`, use the 
    - Watch the terminal for `[BLE Debug] Detail URL ready for kiosk: http://192.168.1.158:9999/detail?...` and “Advertisement registered”.
 
 3. **Refresh the kiosk view**
-   - On the Pi desktop press `F5` in Chromium (already pointed at `http://localhost`), or run `bash ~/Documents/remoteled/pi/kiosk.sh` to relaunch kiosk mode.
+   - On the Pi desktop press `F5` in Chromium (already pointed at `http://localhost`), or relaunch the kiosk launcher (`/usr/local/remoteled/kiosk.sh`, the script you supplied at install time).
 
 4. **Scan the QR from Android**
    - Once the QR is visible, scan it with the Android app. If the kiosk ever sticks on `CONNECTED!`, press `Ctrl+C` in the Pi terminal, rerun `./start.sh`, and refresh Chromium again.
 
 ## Quick Start (Android)
-- Build from source: open `android/RemoteLedBLE` in Android Studio and run on a device (Android 14+ as configured).
-- Or install the included debug APK: `remoteled.apk` (for local testing only; rebuild your own for distribution).
+- Build from source: open `android/RemoteLedBLE` in Android Studio and run on a device (Android 8.0+ / `minSdk=26`). No prebuilt APK is committed — build your own (see Manual APK Build below).
 - Launch the app and scan the QR on the Pi. The app also handles deep links of the form `remoteled://connect/...` if opened directly.
+- The API base URL is baked in at build time via `API_BASE_URL` in `android/RemoteLedBLE/app/build.gradle.kts` (default `http://192.168.1.158:9999` — change to your Mac's LAN IP).
 
 Emulator note: The Android emulator does not support Bluetooth LE and the app declares BLE as a required feature in the manifest. Installation and BLE will fail on the emulator—use a real device.
 
@@ -232,31 +230,28 @@ Your phone can now communicate with the backend at `http://YOUR_MAC_IP:9999`.
 
 ## GPIO Pins
 - Python implementation: uses BCM pin `17` (`RPi.GPIO`). Change in `pi/python/code.py` if needed.
-- Node implementation: uses `onoff` with pin `529` in `pi/node/main.js`. Adjust to your board’s GPIO numbering if you’re on a standard Raspberry Pi; common choice is BCM `17`.
+- The payment flow uses three LEDs by default (BCM): green `17`, yellow `19`, red `27` (see `backend/.env.example`).
 
 ## Run Manually (without systemd)
-- Node BLE peripheral:
-  - `cd /usr/local/remoteled/node && sudo node main.js`
 - Python BLE peripheral:
   - `cd /usr/local/remoteled/python && source bt/bin/activate && python3 code.py`
+  - (On a dev machine: `cd pi/python && python3 code.py`)
 - Kiosk page (already served by nginx): `http://localhost` on the Pi
 
 ## Troubleshooting
 - No QR on kiosk:
   - Check nginx: `systemctl status nginx`
-  - Verify BLE service is running (Python or Node)
+  - Verify the Python BLE service is running
 - Bluetooth won't power on:
   - `rfkill list`, then `sudo rfkill unblock bluetooth && sudo hciconfig hci0 up`
 - Can’t see a deep link in logs:
-  - Confirm exactly one BLE service is active (Python OR Node)
-  - Tail logs with `journalctl -u remoteled-python.service -f` (or Node)
+  - Tail logs with `journalctl -u remoteled-python.service -f`
 - Android cannot connect:
   - Ensure Bluetooth and Location permissions are granted
-  - App requires Android 14+ as configured; consider lowering `minSdk` in `build.gradle.kts`
-  - Ensure the active implementation (Node or Python) matches what you expect (`systemctl status`)
+  - The app targets `minSdk=26` (Android 8.0+)
+  - Confirm the phone's `API_BASE_URL` points at your running backend's LAN IP
 - GPIO not toggling:
-  - Confirm the pin numbers match your hardware
-  - For Node, change the pin in `pi/node/main.js` from `529` to a valid BCM number (e.g., `17`) for Raspberry Pi
+  - Confirm the pin numbers match your hardware (BCM 17 by default)
 
 ## How it works (one‑minute version)
 - Pi generates random 16‑bit service/characteristic UUIDs and a short session key (`bleKey`), then displays a deep link as a QR code on the kiosk.
@@ -264,11 +259,12 @@ Your phone can now communicate with the backend at `http://YOUR_MAC_IP:9999`.
 
 ## Security Notes
 - Session key: `bleKey` is short (16‑bit) and rotates per session; fine for demos, not strong security. For production, use pairing or stronger authentication.
-- Privileges: Node BLE currently runs with `sudo` to access HCI. Consider a dedicated service user and Linux capabilities (`CAP_NET_RAW`, `CAP_NET_ADMIN`).
+- Authorizations are ECDSA-signed (secp256k1) by the backend and verified on the device.
+- Privileges: the BLE peripheral runs with `sudo` to access HCI. Consider a dedicated service user and Linux capabilities (`CAP_NET_RAW`, `CAP_NET_ADMIN`).
 
 ## Reference
 - Web kiosk displays the deep link as a QR code.
-- Services: `remoteled-node.service` and `remoteled-python.service` (conflicting).
+- Systemd service: `remoteled-python.service`.
 
 ## Database Setup
 
@@ -362,53 +358,62 @@ bleKey: ZZZZ
 
 **3. Start FastAPI Backend**
 
-On your development machine:
+On your development machine (the whole stack uses port 9999):
 ```bash
 cd backend
-uv run --no-project uvicorn app.main:app --reload
+uv run --no-project uvicorn app.main:app --reload --host 0.0.0.0 --port 9999
 ```
 
-Backend will start on `http://localhost:8000`
+Backend starts on `http://localhost:9999` (interactive Swagger docs at `/docs`).
 
-**4. Test LED Control via Payment API**
+**4. Test LED Control directly (bypassing payment)**
+
+Use the `/led/control` endpoint. `color` is `red|yellow|green`, `mode` is `on|off|blink`:
 
 ```bash
-# Test GREEN LED (payment success)
-curl -X POST http://localhost:8000/api/payment/mock \
+# GREEN LED on
+curl -X POST http://localhost:9999/led/control \
   -H "Content-Type: application/json" \
-  -d '{"status": "success"}'
+  -d '{"color": "green", "mode": "on"}'
 
-# Test RED LED (payment failed)
-curl -X POST http://localhost:8000/api/payment/mock \
+# RED LED blink
+curl -X POST http://localhost:9999/led/control \
   -H "Content-Type: application/json" \
-  -d '{"status": "failed"}'
+  -d '{"color": "red", "mode": "blink"}'
 
-# Test YELLOW LED (payment processing)
-curl -X POST http://localhost:8000/api/payment/mock \
+# All LEDs off
+curl -X POST http://localhost:9999/led/control \
   -H "Content-Type: application/json" \
-  -d '{"status": "processing"}'
+  -d '{"color": "green", "mode": "off"}'
 ```
 
 **Expected Results:**
-- Pi logs: `[LEDService] GREEN LED (GPIO 17) turned ON (exclusive)`
-- Backend logs: `[BLE] ✓ green LED turned ON`
+- Backend logs: `[LED Control] Request: GREEN ON`
 - Hardware: Correct LED lights up (Green=GPIO17, Yellow=GPIO19, Red=GPIO27)
 
 **Troubleshooting:**
 - "Device not found": Ensure Pi is running `code.py` and Bluetooth is enabled
 - "Module not found" errors: Run `uv sync` (or `uv sync --extra pi` on Pi)
-- Database connection errors: Ensure PostgreSQL is running and database is created
+- Database connection errors: Ensure PostgreSQL is running and the `remoteled` database exists
 
-📚 **Detailed API documentation**: See [`backend/README.md`](backend/README.md) for complete API reference
+### Frontend (admin console)
+
+```bash
+cd frontend/admin-react
+npm install
+npm run dev        # http://localhost:5173/admin/ (proxies /api -> http://localhost:9999)
+npm run build      # production build -> dist/
+npm run test:unit  # vitest (note: script is `test:unit`, not `test`)
+```
+
+📚 **Detailed API documentation**: See [`backend/README.md`](backend/README.md) for the complete API reference, and [`frontend/admin-react/README.md`](frontend/admin-react/README.md) for the admin console.
 
 ## Further reading
-- `docs/ARCHITECTURE.md`
-- `docs/CODEBASE_OVERVIEW.md`
-- `docs/UNDERSTANDING_REMOTELED_CORE_CONCEPTS.md`
-- `docs/QR_FLOW.md`
-- `docs/VENDINGMACHINE_DIAGRAMS.md`
-- `database/README.md`
+- `docs/ARCHITECTURE.md` — component and data-flow overview
+- `docs/SYSTEM.md` — detailed system design
+- `backend/README.md` — API reference
+- `database/README.md` — schema, queries, maintenance
 
 ## Notes
-- Binaries (`remoteled.apk`, zipped artifacts) are included here for convenience during local development. Avoid committing binaries in a public repo; build from source instead.
-- More background and diagrams: see `docs/ARCHITECTURE.md`.
+- No prebuilt Android APK is committed — build from source (see Manual APK Build above).
+- More background and diagrams: see `docs/ARCHITECTURE.md` and `docs/SYSTEM.md`.

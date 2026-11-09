@@ -17,20 +17,24 @@ backend/             Python FastAPI API server (port 9999)
     models/          Pydantic request/response schemas
     services/        ECDSA crypto signing
 frontend/
-  admin-react/       React 18 + TypeScript + Vite admin console (port 5173)
+  admin-react/       React 18 + TypeScript + Vite admin console, served at /admin/ (dev port 5173)
     src/
-      core/          API client (Axios), TypeScript types, utils — PRIMARY shared code
-      contexts/      AuthContext (localStorage JWT)
-      features/      Feature modules: auth, dashboard, devices, orders, products
-      components/    Shared UI (Badge, Button, Modal, forms, layout)
-      pages/         Route pages (Dashboard, Login)
-      hooks/         Data hooks (legacy — prefer features/*/use*.ts)
-      api/           Fetch-based client (legacy — prefer core/api/client.ts)
+      main.tsx       Entry: BrowserRouter basename=/admin + AuthProvider (contexts/AuthContext)
+      App.tsx        Routes -> pages/Dashboard, pages/Login
+      pages/         ACTIVE route pages (Dashboard, Login) — what the app actually renders
+      hooks/         ACTIVE data hooks (use*.ts) used by pages/Dashboard
+      api/           ACTIVE fetch-based apiClient + per-resource modules
+      components/    ACTIVE UI: common/, dashboard/, forms/, layout/ (+ flat Badge/Button/etc)
+      contexts/      ACTIVE AuthContext (localStorage JWT, key `remoteled_auth_token`)
+      types/ config/ constants/ utils/   ACTIVE shared code
+      core/          Parallel refactor (Axios client, types, utils) — NOT wired into App.tsx
+      features/      Parallel refactor (auth/dashboard/devices/orders/products) — NOT wired in
+      context/       Singular dir — unused alt AuthContext/AppContext
 database/            PostgreSQL schema, seed data, migrations
-pi/                  Raspberry Pi BLE peripheral (Python/Node) + kiosk
-android/             Kotlin Android app (BLE GATT + QR scanner)
+pi/                  Raspberry Pi BLE peripheral (Python; see gotchas) + kiosk (static web/ and CRA kiosk/)
+android/             Kotlin Android app (BLE GATT + QR scanner), minSdk 26
 tests/               Shell-script integration tests
-docs/                Architecture docs
+docs/                Architecture docs (ARCHITECTURE.md, SYSTEM.md)
 plans/               Improvement plans
 ```
 
@@ -39,10 +43,10 @@ plans/               Improvement plans
 | Component | Stack |
 |-----------|-------|
 | Backend | Python 3.11+, FastAPI, psycopg2 (sync), Pydantic, Stripe, ECDSA (secp256k1), Bleak (BLE) |
-| Frontend | React 18, TypeScript 5.5, Vite 5, Tailwind CSS, Recharts, Axios, React Router 6 |
+| Frontend | React 18, TypeScript 5.5, Vite 5, Recharts, React Router 6. Active client uses `fetch`; the unused `core/` refactor uses Axios |
 | Database | PostgreSQL 15+, raw SQL with RealDictCursor (no ORM) |
-| Pi | Python (bluezero/bleak) or Node.js BLE peripheral, nginx kiosk |
-| Android | Kotlin, BLE GATT, CameraX + ML Kit QR, minSdk 34 |
+| Pi | Python (bluezero) BLE peripheral, nginx kiosk (Node variant is not shipped — `pi/node/main.js` missing) |
+| Android | Kotlin, BLE GATT, CameraX + ML Kit QR, minSdk 26 |
 | Packages | uv (Python), npm (Node), Gradle (Android) |
 
 ## Key Commands
@@ -53,8 +57,9 @@ cd backend && uv run --no-project uvicorn app.main:app --reload --host 0.0.0.0 -
 # Swagger docs: http://localhost:9999/docs
 
 # Frontend
-cd frontend/admin-react && npm run dev    # http://localhost:5173/admin/
-cd frontend/admin-react && npm run test   # vitest
+cd frontend/admin-react && npm install        # axios/tailwindcss are imported/configured but not in package.json
+cd frontend/admin-react && npm run dev         # http://localhost:5173/admin/
+cd frontend/admin-react && npm run test:unit   # vitest (NOTE: script is test:unit; `npm run test` / `make test-frontend` fail)
 
 # Database
 createdb remoteled
@@ -65,11 +70,12 @@ psql -d remoteled -f database/seed.sql
 docker compose -f docker-compose.admin.yml up
 
 # Makefile shortcuts
-make dev-backend      # start FastAPI
+make dev-backend      # start FastAPI (port 9999)
 make dev-frontend     # start Vite
-make test             # run all tests
 make db-reset         # drop + recreate + seed
 make install          # uv sync + npm install
+# make test / make test-frontend are BROKEN: they call `npm run test`, which doesn't exist (use test:unit)
+# make test-backend runs `uv run pytest` but pytest is only in backend/requirements.txt, not pyproject.toml
 ```
 
 ## Database Schema
@@ -129,19 +135,21 @@ make install          # uv sync + npm install
 - **Crypto**: ECDSA secp256k1 signing in `app/services/crypto.py`.
 - **BLE**: Bleak library for macOS/Linux BLE communication in `app/core/led_handler.py`.
 
-### Frontend
-- **API client**: `src/core/api/client.ts` (Axios) is primary. Auto-detects dev (localhost:9999) vs prod (/api proxy). Request interceptor adds Bearer token from localStorage.
-- **Auth**: `src/contexts/AuthContext.tsx`. Token in localStorage as `access_token`.
-- **Hooks**: feature hooks in `src/features/*/use*.ts` (primary) follow useState + useCallback + try/catch pattern.
+### Frontend (what actually renders)
+- **Entry**: `main.tsx` -> `App.tsx` -> `pages/Dashboard.tsx` + `pages/Login.tsx`. This is the live tree. `features/` + `core/` are an incomplete parallel refactor App.tsx never imports — add new code to the active path (`pages/`, `hooks/`, `components/`, `api/`), not to `features/`/`core/`.
+- **API client**: `src/api/client.ts` — a thin `fetch` wrapper (`apiClient.get/post/...`). Base URL from `src/config/constants.ts`.
+- **Auth**: `src/contexts/AuthContext.tsx` (the one `main.tsx` uses). Token in localStorage as `remoteled_auth_token` (NOT `access_token` — that key belongs to the unused `core/api/client.ts`).
+- **Hooks**: `src/hooks/use*.ts` (useState + useCallback + try/catch). `pages/Dashboard.tsx` consumes these.
 - **Routing**: React Router 6. Base path `/admin/`. Vite proxy: `/api` -> `http://localhost:9999`.
-- **Styling**: Tailwind CSS only (no CSS modules).
+- **Styling**: `index.css` has `@tailwind` directives and `tailwind.config.js` exists, but `tailwindcss` is not in package.json and `postcss.config.js` only loads autoprefixer — Tailwind is effectively not wired; styling leans on custom CSS in `App.css`/`index.css`.
 
 ## Common Pitfalls
 
 - **Port 9999**: Backend runs on 9999 locally. Docker compose uses 8000. Do NOT hardcode ports in frontend — use the API client.
 - **No ORM**: Database is raw psycopg2. Do not introduce async DB calls (asyncpg) or SQLAlchemy without migrating everything.
-- **Dual frontend paths**: `src/core/` + `src/features/` is primary. `src/api/` + `src/hooks/` is legacy. Add new code to the primary path.
-- **Firebase is dead**: Still in pyproject.toml deps but NOT used. Auth was migrated to local JWT. Do not re-add Firebase auth.
+- **Dual frontend paths**: the ACTIVE path is `pages/` + `hooks/` + `components/` + `api/` (fetch) + `contexts/AuthContext`. `core/` (Axios) + `features/` + `context/` (singular) are an unfinished parallel refactor that `App.tsx`/`main.tsx` never import. Add new code to the active path; do not assume `features/`/`core/` is live.
+- **Firebase is dead**: `firebase-admin` is in pyproject.toml and `firebase` is in frontend package.json, but neither is used. Auth is local JWT. Do not re-add Firebase.
+- **No prebuilt APK / missing Pi files**: no `remoteled.apk` is committed; `pi/node/main.js` and the `pi/kiosk.sh` that `pi/install.sh` copies are both absent — only the Python BLE path works, and the installer needs a `kiosk.sh` supplied.
 - **Service type constraints**: TRIGGER must not have fixed_minutes/minutes_per_25c. FIXED requires fixed_minutes. VARIABLE requires minutes_per_25c. Enforced at both DB and API level.
 - **Order status transitions**: Strictly validated via `valid_transitions` dict in `orders.py`. Cannot skip states.
 - **UUID validation**: All IDs are UUID v4. Use `validate_uuid()` from `app/core/validators.py`.
